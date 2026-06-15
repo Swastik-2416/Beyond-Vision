@@ -1,3 +1,4 @@
+import AVFoundation
 import CoreHaptics
 import SwiftUI
 
@@ -30,12 +31,34 @@ final class HapticManager: ObservableObject {
     private var isPlaying = false
 
     init() {
+        // .playback + .mixWithOthers is required for an accessibility app:
+        //   • .playback ignores the hardware silent/mute switch, so TTS
+        //     always speaks aloud even when the phone is "silenced".
+        //   • .mixWithOthers lets the haptic engine and music/other audio
+        //     coexist instead of ducking or interrupting each other.
+        // .ambient (the old setting) was silenced by the mute switch — that
+        // was why speech was never heard during haptic exploration.
+        try? AVAudioSession.sharedInstance().setCategory(
+            .playback,
+            mode: .spokenAudio,
+            options: [.mixWithOthers, .duckOthers]
+        )
+        try? AVAudioSession.sharedInstance().setActive(true)
+
         guard supportsHaptics else { return }
         do {
             let engine = try CHHapticEngine()
-            engine.playsHapticsOnly = true
             // Restart automatically if the engine is reset by the system.
             engine.resetHandler = { [weak engine] in try? engine?.start() }
+            engine.stoppedHandler = { [weak self, weak engine] reason in
+                // Re-start the engine after a system-initiated stop (e.g.
+                // phone call, audio route change).
+                DispatchQueue.main.async {
+                    self?.player = nil
+                    self?.isPlaying = false
+                    try? engine?.start()
+                }
+            }
             try engine.start()
             self.engine = engine
         } catch {

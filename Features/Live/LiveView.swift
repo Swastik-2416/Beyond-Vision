@@ -42,8 +42,13 @@ struct LiveView: View {
         .onAppear {
             camera.start()
             camera.setFrameHandler { buffer in
-                let frame = UncheckedSendable(buffer)
-                DispatchQueue.main.async { vision.analyze(pixelBuffer: frame.value) }
+                // Analyze directly on the background video queue — VisionManager
+                // guards against overlapping calls with isAnalyzing, so frames
+                // that arrive while analysis is in flight are simply dropped.
+                // Avoid dispatching to main first: the pixel buffer may be
+                // reclaimed by the camera pipeline before the block runs, causing
+                // a crash or corrupted frame.
+                vision.analyze(pixelBuffer: buffer)
             }
         }
         .onChange(of: camera.status) { _, newStatus in

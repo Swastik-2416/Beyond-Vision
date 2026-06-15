@@ -76,6 +76,13 @@ final class VisionManager: ObservableObject, @unchecked Sendable {
         let work = UncheckedSendable(input)
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            defer {
+                // Reset directly on this background queue — isAnalyzing is a
+                // private Bool only used inside performAnalysis (never published
+                // to the UI), so no main-thread hop is needed and there is no
+                // data-race risk. Avoids the Swift 6 "Sending self" warning.
+                self?.isAnalyzing = false
+            }
             let input = work.value
             func makeHandler() -> VNImageRequestHandler {
                 switch input {
@@ -139,47 +146,51 @@ final class VisionManager: ObservableObject, @unchecked Sendable {
             }
 
             let unique = Self.deduplicate(detections)
-            DispatchQueue.main.async {
+            // Use Task/@MainActor instead of DispatchQueue.main.async — this is
+            // the Swift 6-safe way to hop to the main actor without triggering
+            // a "Sending self risks causing data races" diagnostic.
+            Task { @MainActor [weak self] in
                 self?.observations = unique
                 self?.lastLabel = ""
-                self?.isAnalyzing = false
             }
         }
     }
 
     /// Runs Vision's image classifier constrained to each candidate's region and
-    /// upgrades the label to a more specific one when the classifier is confident.
+    /// assigns a label to saliency-only candidates (those with no label yet).
+    /// Candidates that already carry a label from the specialist detectors
+    /// (VNRecognizeAnimalsRequest → "Cat"/"Dog", YOLO → "car"/"person"/…)
+    /// are returned as-is: VNClassifyImageRequest is a general-purpose whole-image
+    /// classifier whose broad results ("animal", "mammal") would override the more
+    /// accurate specialist labels if we let it run on every candidate.
     private static func refineLabels(for candidates: [DetectedObject],
                                      makeHandler: () -> VNImageRequestHandler) -> [DetectedObject] {
-        guard !candidates.isEmpty else { return [] }
+        return candidates.map { candidate in
+            // Already labelled by a specialist detector — keep it verbatim.
+            if let existing = candidate.topLabel {
+                return DetectedObject(boundingBox: candidate.boundingBox,
+                                      confidence: candidate.confidence,
+                                      topLabel: clean(existing))
+            }
 
-        let requests = candidates.map { candidate -> VNClassifyImageRequest in
+            // Saliency-only candidate: no label yet. Run the general classifier
+            // on a fresh handler so regionOfInterest applies correctly.
             let req = VNClassifyImageRequest()
             req.regionOfInterest = candidate.boundingBox
-            return req
-        }
-        try? makeHandler().perform(requests)
+            try? makeHandler().perform([req])
 
-        return candidates.enumerated().map { index, candidate in
-            let results = requests[index].results
-            let confidentSpecific = results?.first(where: { $0.confidence > 0.5 })
+            // Results ARE sorted by confidence descending per Apple docs,
+            // but max() is used defensively.
+            let results = req.results ?? []
+            let best = results.max(by: { $0.confidence < $1.confidence })
+            let label = best.map { clean($0.identifier) } ?? "object"
 
-            let label: String
-            if let confidentSpecific {
-                // Classifier is sure — prefer its (usually more specific) label.
-                label = clean(confidentSpecific.identifier)
-            } else if let existing = candidate.topLabel {
-                label = clean(existing)
-            } else if let loose = results?.first(where: { $0.confidence > 0.3 }) {
-                label = clean(loose.identifier)
-            } else {
-                label = "object"
-            }
             return DetectedObject(boundingBox: candidate.boundingBox,
                                   confidence: candidate.confidence,
                                   topLabel: label)
         }
     }
+
 
     private static func recognizeText(makeHandler: () -> VNImageRequestHandler,
                                       level: VNRequestTextRecognitionLevel) -> [DetectedObject] {
@@ -251,8 +262,11 @@ final class VisionManager: ObservableObject, @unchecked Sendable {
     }
 
     private func speak(_ text: String) {
+        // hitTest() is always called from DragGesture (main thread), so we
+        // are already on the main thread here — no dispatch needed.
         let utterance = AVSpeechUtterance(string: text)
-        utterance.rate = 0.55
+        utterance.rate = 0.52
+        utterance.pitchMultiplier = 1.1
         utterance.voice = AVSpeechSynthesisVoice(language: "en-US")
         speech.stopSpeaking(at: .immediate)
         speech.speak(utterance)

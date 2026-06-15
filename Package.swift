@@ -16,8 +16,8 @@ let package = Package(
         .iOSApplication(
             name: "Beyond Vision",
             targets: ["AppModule"],
-            bundleIdentifier: "in.swastik.version2",
-            teamIdentifier: "ZWB893DPHV",
+            bundleIdentifier: "in.swastik.beyondVision",
+            teamIdentifier: "73B8W4ZN6V",
             displayVersion: "1.0",
             bundleVersion: "1",
             appIcon: .asset("AppIcon"),
@@ -49,5 +49,5 @@ let package = Package(
             ]
         )
     ],
-    swiftLanguageModes: [.v6]
+    swiftLanguageVersions: [.version("6")]
 )
